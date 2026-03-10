@@ -1,0 +1,36 @@
+{
+  "name": "@striderlabs/mcp-booking",
+  "version": "0.1.0",
+  "description": "MCP server for Booking.com - let AI agents search hotels, check availability, and manage reservations",
+  "main": "dist/index.js",
+  "bin": {
+    "striderlabs-mcp-booking": "dist/index.js"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "booking",
+    "hotel",
+    "travel",
+    "ai-agent",
+    "strider",
+    "model-context-protocol",
+    "browser-automation",
+    "playwright"
+  ],
+  "author": "Strider Labs <hello@striderlabs.ai>",
+  "license": "MIT",
+  "homepage": "https://striderlabs.ai",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "playwright": "^1.40.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  }
+}
