@@ -25,7 +25,7 @@ This MCP (Model Context Protocol) server gives AI agents the ability to interact
 | `booking_filter_results` | Filter last search by price, rating, amenities |
 | `booking_sort_results` | Sort last search by price/rating/distance/reviews |
 | `booking_save_property` | Save to wishlist/favorites |
-| `booking_book` | Book a room (requires `confirm=true`) |
+| `booking_book` | Get a "continue in your browser" booking link (does not place the booking) |
 | `booking_get_reservations` | List current/upcoming reservations |
 | `booking_cancel_reservation` | Cancel a booking (requires `confirm=true`) |
 | `booking_get_reviews` | Get guest reviews for a property |
@@ -126,26 +126,38 @@ booking_get_prices(propertyUrl="...", checkIn="2026-06-01", checkOut="2026-06-05
 
 ### Book a room
 
+`booking_book` does **not** place a booking. Booking.com checkout is a multi-step
+wizard (room selection → guest contact details → payment) that can't be reliably
+completed via automation, so this returns a `bookingUrl` to finish in a browser.
+
 ```
-# Preview first (no confirm flag)
+# Returns a bookingUrl (property page with dates/occupancy pre-filled,
+# opening on the room list with "Reserve" buttons) to complete in a browser.
 booking_book(propertyUrl="...", checkIn="2026-06-01", checkOut="2026-06-05", adults=2)
 
-# Confirm booking (only after explicit user approval)
-booking_book(propertyUrl="...", checkIn="2026-06-01", checkOut="2026-06-05", adults=2, confirm=true)
+# Optional: also best-effort capture a deeper checkoutUrl with the first
+# available room pre-selected (still stops before any guest/payment details).
+booking_book(propertyUrl="...", checkIn="2026-06-01", checkOut="2026-06-05", adults=2, advanceToCheckout=true)
 ```
 
 ### Manage reservations
 
 ```
+# List current/upcoming reservations. Each result's reservationId is the trip id
+# (or "<tripId>-<n>" for a specific booking within a multi-booking trip).
 booking_get_reservations()
-booking_cancel_reservation(reservationId="12345678", confirm=true)
+
+# Cancel walks Booking.com's multi-step flow: confirmation page -> "Cancel your
+# booking" -> reason survey (Step 1 of 2) -> final confirm (Step 2). The final
+# step is irreversible, so it only runs with confirm=true.
+booking_cancel_reservation(reservationId="308612662158023")           # no-op preview
+booking_cancel_reservation(reservationId="308612662158023", confirm=true)  # actually cancels
 ```
 
 ## Safety
 
-- `booking_book` requires `confirm=true` and should only be called with explicit user confirmation
-- `booking_cancel_reservation` requires `confirm=true` and is irreversible
-- Both tools return a preview/warning when called without the confirm flag
+- `booking_book` never places a booking — it returns a link to complete checkout (contact details + payment) in a browser
+- `booking_cancel_reservation` requires `confirm=true`; without it, it returns a no-op warning and never opens a browser. With it, it drives the multi-step cancel flow (reason survey + final confirm) and the last step is irreversible
 
 ## Development
 

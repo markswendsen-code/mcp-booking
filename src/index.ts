@@ -318,7 +318,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "booking_book",
         description:
-          "Book a room at a property. IMPORTANT: Set confirm=true only when you have explicit user confirmation. Without confirm=true, returns a preview instead of placing the booking.",
+          "Get a 'continue in your browser' link to book a room. Booking.com checkout is a multi-step wizard " +
+          "(room selection, guest contact details, then payment) that cannot be reliably completed via automation, " +
+          "so this NEVER places a booking. It returns a bookingUrl (the property page with dates/occupancy pre-filled, " +
+          "opening directly on the room list with Reserve buttons) for the user to finish by hand. " +
+          "Set advanceToCheckout=true to also best-effort capture a deeper checkoutUrl with the first available room pre-selected.",
         inputSchema: {
           type: "object",
           properties: {
@@ -342,10 +346,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Number of rooms (default: 1)",
             },
-            confirm: {
+            advanceToCheckout: {
               type: "boolean",
               description:
-                "Set to true to actually place the booking. If false or omitted, returns a preview. NEVER set to true without explicit user confirmation.",
+                "If true, best-effort: select the first available room and capture a deeper checkoutUrl (still stops before any guest/payment details). If false or omitted, only the property+dates bookingUrl is returned.",
             },
           },
           required: ["propertyUrl", "checkIn", "checkOut"],
@@ -363,14 +367,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "booking_cancel_reservation",
         description:
-          "Cancel an existing reservation. IMPORTANT: Set confirm=true only when you have explicit user confirmation. This action cannot be undone.",
+          "Cancel an existing reservation. Walks Booking.com's multi-step cancel flow " +
+          "(confirmation page, reason survey, final confirm). IMPORTANT: Set confirm=true " +
+          "only with explicit user confirmation — the final step is irreversible. Without " +
+          "confirm=true it returns a no-op warning and never opens a browser.",
         inputSchema: {
           type: "object",
           properties: {
             reservationId: {
               type: "string",
               description:
-                "The reservation/booking ID from booking_get_reservations",
+                "The reservationId from booking_get_reservations (the trip id, or " +
+                "'<tripId>-<n>' for a specific booking in a multi-booking trip). A full " +
+                "confirmation/detail URL is also accepted.",
             },
             confirm: {
               type: "boolean",
@@ -746,43 +755,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           checkOut,
           adults = 2,
           rooms = 1,
-          confirm = false,
+          advanceToCheckout = false,
         } = args as {
           propertyUrl: string;
           checkIn: string;
           checkOut: string;
           adults?: number;
           rooms?: number;
-          confirm?: boolean;
+          advanceToCheckout?: boolean;
         };
-
-        if (!confirm) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(
-                  {
-                    success: true,
-                    requiresConfirmation: true,
-                    preview: {
-                      propertyUrl,
-                      checkIn,
-                      checkOut,
-                      adults,
-                      rooms,
-                    },
-                    message:
-                      "Booking not placed. To proceed, call booking_book with confirm=true. " +
-                      "IMPORTANT: Only do this after getting explicit user confirmation.",
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        }
 
         const result = await bookRoom(
           propertyUrl,
@@ -790,14 +771,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           checkOut,
           adults,
           rooms,
-          true
+          advanceToCheckout
         );
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ success: true, ...result }, null, 2),
+              text: JSON.stringify({ ...result }, null, 2),
             },
           ],
         };
@@ -836,14 +817,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: JSON.stringify(
-                {
-                  success: result.success,
-                  message: result.message,
-                },
-                null,
-                2
-              ),
+              text: JSON.stringify({ ...result }, null, 2),
             },
           ],
         };

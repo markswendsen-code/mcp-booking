@@ -125,13 +125,19 @@ export interface RoomOption {
 
 export interface Reservation {
   reservationId: string;
+  tripId?: string;
+  destination?: string;
   propertyName: string;
   checkIn: string;
   checkOut: string;
+  dates?: string;
   guests?: number;
   totalPrice?: string;
   status: string;
+  freeCancellation?: boolean;
   confirmationNumber?: string;
+  /** Link to the full booking confirmation page (confirmation.en-us.html). */
+  detailUrl?: string;
 }
 
 export interface Review {
@@ -1385,8 +1391,29 @@ export async function saveProperty(
   }
 }
 
+export interface BookingHandoff {
+  success: boolean;
+  /** Property page with dates + occupancy pre-filled — opens the room list ready to reserve. */
+  bookingUrl: string;
+  /** Deeper checkout-wizard URL, when `advanceToCheckout` could reach it (best-effort). */
+  checkoutUrl?: string;
+  summary: Record<string, unknown>;
+  message: string;
+}
+
 /**
- * Book a room (with explicit confirmation required)
+ * Produce a "continue in your browser" link for booking a room.
+ *
+ * Booking.com checkout is a multi-step wizard (room selection → guest contact
+ * details → payment) that cannot be reliably or safely completed via automation,
+ * so this NEVER places a booking. It returns a `bookingUrl` (the property page
+ * with dates/occupancy pre-filled, which opens directly on the room list with
+ * "Reserve" buttons) for the user to finish by hand.
+ *
+ * When `advanceToCheckout` is true it makes a best-effort attempt to click
+ * "Reserve" on the first available room and capture the deeper checkout-wizard
+ * URL as `checkoutUrl`; failures here are non-fatal (the `bookingUrl` is always
+ * returned). It still stops short of entering any guest/payment details.
  */
 export async function bookRoom(
   propertyUrlOrId: string,
@@ -1394,53 +1421,55 @@ export async function bookRoom(
   checkOut: string,
   adults: number = 2,
   rooms: number = 1,
-  confirmBooking: boolean = false
-): Promise<
-  | { requiresConfirmation: true; summary: Record<string, unknown> }
-  | { success: boolean; bookingId?: string; message: string }
-> {
-  if (!confirmBooking) {
-    // Return a preview / dry-run
-    let previewUrl = propertyUrlOrId;
-    if (!previewUrl.startsWith("http")) {
-      const cached = lastSearchResults.find(
-        (r) => r.propertyId === propertyUrlOrId
+  advanceToCheckout: boolean = false
+): Promise<BookingHandoff> {
+  // Resolve to a full property URL (accepts a propertyId from cached search).
+  let url = propertyUrlOrId;
+  if (!url.startsWith("http")) {
+    const cached = lastSearchResults.find(
+      (r) => r.propertyId === propertyUrlOrId
+    );
+    if (cached?.url) {
+      url = cached.url;
+    } else {
+      throw new Error(
+        "Property URL required (or run booking_search first to cache results)"
       );
-      if (cached?.url) previewUrl = cached.url;
     }
-    return {
-      requiresConfirmation: true,
-      summary: {
-        propertyUrl: previewUrl,
-        checkIn,
-        checkOut,
-        adults,
-        rooms,
-        message:
-          "Booking not placed. To confirm, call booking_book with confirm=true. " +
-          "IMPORTANT: Only set confirm=true after explicit user confirmation.",
-      },
-    };
   }
 
-  const { page, context } = await initBrowser();
-
+  // Set date/occupancy params cleanly so search-derived URLs (which already
+  // carry checkin/checkout/group_adults) aren't duplicated.
+  let bookingUrl: string;
   try {
-    let url = propertyUrlOrId;
-    if (!url.startsWith("http")) {
-      const cached = lastSearchResults.find(
-        (r) => r.propertyId === propertyUrlOrId
-      );
-      if (cached?.url) {
-        url = cached.url;
-      } else {
-        throw new Error("Property URL required or run booking_search first");
-      }
-    }
-
+    const u = new URL(url);
+    u.searchParams.set("checkin", checkIn);
+    u.searchParams.set("checkout", checkOut);
+    u.searchParams.set("group_adults", String(adults));
+    u.searchParams.set("no_rooms", String(rooms));
+    bookingUrl = u.toString();
+  } catch {
     const separator = url.includes("?") ? "&" : "?";
-    const dateParams = `checkin=${checkIn}&checkout=${checkOut}&group_adults=${adults}&no_rooms=${rooms}`;
-    await page.goto(`${url}${separator}${dateParams}`, {
+    bookingUrl = `${url}${separator}checkin=${checkIn}&checkout=${checkOut}&group_adults=${adults}&no_rooms=${rooms}`;
+  }
+
+  const summary = { propertyUrl: url, checkIn, checkOut, adults, rooms };
+  const baseMessage =
+    "No booking was placed. Booking.com checkout is a multi-step wizard " +
+    "(room selection, guest contact details, then payment) that must be completed " +
+    "in a browser. Open bookingUrl to pick a room and reserve, then finish the " +
+    "guest and payment steps there.";
+
+  if (!advanceToCheckout) {
+    return { success: true, bookingUrl, summary, message: baseMessage };
+  }
+
+  // Best-effort: advance one step to capture the deeper checkout URL. Any
+  // failure here is non-fatal — we still return the reliable bookingUrl.
+  let checkoutUrl: string | undefined;
+  try {
+    const { page, context } = await initBrowser();
+    await page.goto(bookingUrl, {
       waitUntil: "domcontentloaded",
       timeout: DEFAULT_TIMEOUT,
     });
@@ -1454,8 +1483,6 @@ export async function bookRoom(
       )
       .catch(() => {});
 
-    // Select first available room. Booking's current room table uses
-    // `select-room-trigger` / the "Reserve" CTA (#hp_book_now_button).
     const selectBtn = await page.$(
       '[data-testid="select-room-trigger"], #hp_book_now_button, ' +
         '.hprt-reservation-cta button, button[data-testid="select-room"], ' +
@@ -1463,131 +1490,241 @@ export async function bookRoom(
         'input[type="submit"][value*="Book"]'
     );
 
-    if (!selectBtn) {
-      throw new Error(
-        "No available rooms to book. Try checking availability first."
-      );
+    if (selectBtn) {
+      await selectBtn.click().catch(() => {});
+      await randomDelay(1000, 2000);
+      await page.waitForURL(/\/book(ing)?\//, { timeout: 15000 }).catch(() => {});
+      const reached = page.url();
+      if (/\/book(ing)?\//.test(reached)) {
+        checkoutUrl = reached;
+      }
     }
-
-    await selectBtn.click();
-    await randomDelay(1000, 2000);
-
-    // Wait for booking page
-    await page
-      .waitForURL(/\/book\//, { timeout: 15000 })
-      .catch(() => {});
-
-    // Look for final confirm button
-    const confirmBtn = await page.$(
-      'button[data-testid="confirm-booking"], button:has-text("Complete booking"), ' +
-        'button:has-text("Reserve"), input[type="submit"][value*="Complete"]'
-    );
-
-    if (!confirmBtn) {
-      return {
-        success: false,
-        message:
-          "Reached booking page but could not find final confirm button. " +
-          "Manual completion may be required at: " +
-          (await page.url()),
-      };
-    }
-
-    await confirmBtn.click();
-    await randomDelay(2000, 3000);
-
-    // Extract confirmation number
-    const bookingId = await page
-      .$eval(
-        '[data-testid="confirmation-number"], [class*="confirmation"] span, .conf-number',
-        (el) => el.textContent?.trim()
-      )
-      .catch(() => undefined);
 
     await saveCookies(context);
-
-    return {
-      success: true,
-      bookingId: bookingId || "Confirmation pending",
-      message: `Booking placed successfully! Confirmation: ${bookingId || "check your email"}`,
-    };
-  } catch (error) {
-    throw new Error(
-      `Failed to book room: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    );
+  } catch {
+    // Non-fatal — fall back to bookingUrl only.
   }
+
+  return {
+    success: true,
+    bookingUrl,
+    checkoutUrl,
+    summary,
+    message: checkoutUrl
+      ? baseMessage +
+        " A deeper checkoutUrl (first available room pre-selected) is included; " +
+        "verify the room choice before completing payment."
+      : baseMessage,
+  };
+}
+
+/** Booking.com trips list lives on the secure subdomain (the old
+ * www.booking.com/account/trips path now 404s). */
+const TRIPS_URL = "https://secure.booking.com/mytrips.html";
+
+/** Max trip groups to open for detail enrichment, to bound runtime. */
+const MAX_TRIP_GROUPS = 25;
+
+interface TripGroup {
+  destination: string;
+  dateRange: string;
+  bookingCount: number;
+  tripId: string;
+  href: string;
+  upcoming: boolean;
 }
 
 /**
- * Get current reservations
+ * Get current/upcoming reservations.
+ *
+ * Booking.com's trips page (secure.booking.com/mytrips.html) is a SPA that
+ * groups bookings by destination ("trips"). The list only shows destination +
+ * date range; each trip's detail page (?trip_id=…) renders one anchor per
+ * booking linking to confirmation.en-us.html, whose text concatenates the
+ * property name (in an <h3>), dates, city, cancellation policy, status and
+ * price. So we read the trip-group links (which already carry trip_id) from the
+ * list, then visit each to parse the per-booking cards.
  */
 export async function getReservations(): Promise<Reservation[]> {
   const { page, context } = await initBrowser();
 
   try {
-    await page.goto(`${BOOKING_BASE_URL}/account/trips`, {
+    await page.goto(TRIPS_URL, {
       waitUntil: "domcontentloaded",
       timeout: DEFAULT_TIMEOUT,
     });
     await randomDelay();
     await dismissBanners(page);
 
+    // Trip-group links carry ?trip_id=… and end with "N booking(s)".
     await page
-      .waitForSelector(
-        '[data-testid="booking-card"], .booking-item, [class*="trip-card"]',
-        { timeout: 12000 }
-      )
+      .waitForSelector('a[href*="trip_id="]', { timeout: 12000 })
       .catch(() => {});
 
-    const reservations = await page.evaluate(() => {
-      const cards = document.querySelectorAll(
-        '[data-testid="booking-card"], .booking-item, [class*="trip-card"], [class*="booking-card"]'
-      );
-      const out: Reservation[] = [];
+    const groups: TripGroup[] = await page.evaluate(() => {
+      const clean = (s: string | null | undefined) =>
+        (s || "").replace(/\s+/g, " ").trim();
+      const seen = new Set<string>();
+      const out: TripGroup[] = [];
 
-      cards.forEach((card, i) => {
-        if (i >= 20) return;
+      document
+        .querySelectorAll<HTMLAnchorElement>('a[href*="trip_id="]')
+        .forEach((a) => {
+          const text = clean(a.textContent);
+          const countMatch = text.match(/(\d+)\s+bookings?$/i);
+          if (!countMatch) return;
 
-        const nameEl = card.querySelector(
-          '[data-testid="booking-name"], .hotel-name, [class*="property-name"], h3, h2'
-        );
-        const checkInEl = card.querySelector(
-          '[data-testid="check-in-date"], [class*="checkin"], [class*="check-in"]'
-        );
-        const checkOutEl = card.querySelector(
-          '[data-testid="check-out-date"], [class*="checkout"], [class*="check-out"]'
-        );
-        const priceEl = card.querySelector(
-          '[data-testid="booking-price"], [class*="price"], [class*="total"]'
-        );
-        const statusEl = card.querySelector(
-          '[data-testid="booking-status"], [class*="status"], [class*="state"]'
-        );
-        const confirmEl = card.querySelector(
-          '[data-testid="confirmation-number"], [class*="confirmation"], [class*="pin"]'
-        );
+          const href = a.href;
+          const tripId = (href.match(/[?&]trip_id=(\d+)/) || [])[1] || "";
+          if (!tripId || seen.has(tripId)) return;
+          seen.add(tripId);
 
-        const reservationId =
-          card.getAttribute("data-booking-id") ||
-          card.getAttribute("data-reservation-id") ||
-          confirmEl?.textContent?.trim() ||
-          String(i);
+          // text = "<destination><dateRange>N booking(s)" with fields glued
+          // (the day digit runs into the count, e.g. "Jul 141 booking"), so
+          // take the destination as everything before the first date token.
+          const dateMatch = text.match(
+            /([A-Z][a-z]{2}\s+\d{1,2}(?:\s+\d{4})?\s*[–-]\s*[A-Z][a-z]{2}\s+\d{1,2}(?:\s+\d{4})?|\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}\s*[–-]\s*\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4})/
+          );
+          const dateRange = dateMatch ? clean(dateMatch[0]) : "";
+          const destination =
+            dateMatch && dateMatch.index && dateMatch.index > 0
+              ? clean(text.slice(0, dateMatch.index))
+              : clean(text.replace(/\s*\d+\s+bookings?$/i, ""));
 
-        out.push({
-          reservationId,
-          propertyName: nameEl?.textContent?.trim() || "Unknown Property",
-          checkIn: checkInEl?.textContent?.trim() || "",
-          checkOut: checkOutEl?.textContent?.trim() || "",
-          totalPrice: priceEl?.textContent?.trim() || undefined,
-          status: statusEl?.textContent?.trim() || "Unknown",
-          confirmationNumber: confirmEl?.textContent?.trim() || undefined,
-        } as Reservation);
-      });
+          // Upcoming trips render outside the Past/Canceled tab panels.
+          const upcoming = !a.closest('[role="tabpanel"]');
+
+          out.push({
+            destination,
+            dateRange,
+            bookingCount: parseInt(countMatch[1], 10) || 1,
+            tripId,
+            href,
+            upcoming,
+          });
+        });
 
       return out;
     });
+
+    // The tool surfaces current/upcoming reservations (the actionable ones).
+    // Upcoming trips render outside the Past/Canceled tab panels. If detection
+    // finds none flagged upcoming, fall back to all groups so nothing is missed.
+    const upcomingGroups = groups.filter((g) => g.upcoming);
+    const toFetch = (upcomingGroups.length > 0 ? upcomingGroups : groups).slice(
+      0,
+      MAX_TRIP_GROUPS
+    );
+
+    const reservations: Reservation[] = [];
+
+    for (const group of toFetch) {
+      try {
+        await page.goto(group.href, {
+          waitUntil: "domcontentloaded",
+          timeout: DEFAULT_TIMEOUT,
+        });
+        await page
+          .waitForSelector('a[href*="confirmation"]', { timeout: 8000 })
+          .catch(() => {});
+        await randomDelay(300, 700);
+
+        const cards: Reservation[] = await page.evaluate(
+          (g: TripGroup) => {
+            const clean = (s: string | null | undefined) =>
+              (s || "").replace(/\s+/g, " ").trim();
+            const out: Reservation[] = [];
+
+            const anchors = Array.from(
+              document.querySelectorAll<HTMLAnchorElement>(
+                'a[href*="confirmation"]'
+              )
+            ).filter((a) => a.querySelector("h3"));
+
+            anchors.forEach((a, idx) => {
+              const propertyName = clean(a.querySelector("h3")?.textContent);
+              if (!propertyName) return;
+
+              const full = clean(a.textContent);
+              // Strip the property name prefix to parse the trailing fields.
+              // Card text is "<name><dateRange><city><cancellation?><status><price>"
+              // with fields glued together (no separators), so parse positionally.
+              const rest = clean(full.startsWith(propertyName)
+                ? full.slice(propertyName.length)
+                : full);
+
+              const dateMatch = rest.match(
+                /([A-Z][a-z]{2}\s+\d{1,2}(?:\s+\d{4})?\s*[–-]\s*[A-Z][a-z]{2}\s+\d{1,2}(?:\s+\d{4})?|\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}\s*[–-]\s*\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4})/
+              );
+              const dates = dateMatch ? clean(dateMatch[0]) : g.dateRange;
+              const [checkIn, checkOut] = dates
+                .split(/\s*[–-]\s*/)
+                .map((s) => clean(s));
+
+              // City sits between the date range and the cancellation/status/price.
+              const afterDates =
+                dateMatch && rest.includes(dateMatch[0])
+                  ? clean(rest.slice(rest.indexOf(dateMatch[0]) + dateMatch[0].length))
+                  : rest;
+              const markerRe =
+                /Free cancellation|Non-?refundable|Partially refundable|Confirmed|Completed|Cancelled|Canceled|Pending|Awaiting payment|US\$|CA\$|A\$|\$|€|£|₹/i;
+              const cut = afterDates.search(markerRe);
+              const destination =
+                cut > 0 ? clean(afterDates.slice(0, cut)) : g.destination || undefined;
+
+              // Status words are glued to neighbours, so don't require \b.
+              const statusMatch = rest.match(
+                /(Confirmed|Completed|Cancelled|Canceled|Pending|Awaiting payment)/i
+              );
+              const priceMatch = rest.match(
+                /((?:US\$|CA\$|A\$|\$|€|£|₹)\s?[\d,]+(?:\.\d{2})?)/
+              );
+
+              out.push({
+                reservationId:
+                  anchors.length > 1 ? `${g.tripId}-${idx + 1}` : g.tripId,
+                tripId: g.tripId,
+                destination,
+                propertyName,
+                checkIn: checkIn || "",
+                checkOut: checkOut || "",
+                dates: dates || undefined,
+                totalPrice: priceMatch ? priceMatch[1] : undefined,
+                status: statusMatch
+                  ? statusMatch[1]
+                  : g.upcoming
+                  ? "Upcoming"
+                  : "Unknown",
+                freeCancellation: /free cancellation/i.test(rest),
+                detailUrl: a.href,
+              });
+            });
+
+            return out;
+          },
+          group
+        );
+
+        if (cards.length > 0) {
+          reservations.push(...cards);
+        } else {
+          // Detail page didn't expose confirmation cards — surface the group
+          // so the trip isn't silently dropped.
+          reservations.push({
+            reservationId: group.tripId,
+            tripId: group.tripId,
+            destination: group.destination || undefined,
+            propertyName: group.destination || "Unknown Property",
+            checkIn: (group.dateRange.split(/\s*[–-]\s*/)[0] || "").trim(),
+            checkOut: (group.dateRange.split(/\s*[–-]\s*/)[1] || "").trim(),
+            dates: group.dateRange || undefined,
+            status: group.upcoming ? "Upcoming" : "Unknown",
+          });
+        }
+      } catch {
+        // Skip a trip whose detail page failed to load; keep the rest.
+      }
+    }
 
     await saveCookies(context);
     return reservations;
@@ -1600,67 +1737,256 @@ export async function getReservations(): Promise<Reservation[]> {
   }
 }
 
+export interface CancelResult {
+  success: boolean;
+  reservationId: string;
+  propertyName?: string;
+  status?: string;
+  /** When confirm was omitted/false: signals nothing was cancelled. */
+  requiresConfirmation?: boolean;
+  message: string;
+}
+
 /**
- * Cancel a reservation
+ * Cancel a reservation.
+ *
+ * Booking.com's cancellation is a multi-step flow on the secure subdomain:
+ *   trip detail (?trip_id=…)  →  confirmation.en-us.html  →
+ *   "Cancel your booking" link  →  cancel.html "Step 1 of 2" (reason survey)  →
+ *   "Continue"  →  Step 2 final confirm.
+ *
+ * The final Step-2 confirm is the only irreversible action, so it is gated
+ * behind `confirmCancellation`. Without it, this returns a no-op warning and
+ * never opens a browser.
+ *
+ * `reservationId` accepts the value from getReservations — the trip id, or
+ * "<tripId>-<n>" for a specific booking within a multi-booking trip — or a full
+ * confirmation/detail URL.
  */
 export async function cancelReservation(
   reservationId: string,
   confirmCancellation: boolean = false
-): Promise<{ success: boolean; message: string }> {
+): Promise<CancelResult> {
   if (!confirmCancellation) {
     return {
       success: false,
+      reservationId,
+      requiresConfirmation: true,
       message:
-        `Cancellation not performed. To cancel reservation ${reservationId}, ` +
-        "call booking_cancel_reservation with confirm=true. " +
-        "IMPORTANT: This action cannot be undone.",
+        `Cancellation not performed (safety guard). To cancel reservation ${reservationId}, ` +
+        "call booking_cancel_reservation again with confirm=true. " +
+        "IMPORTANT: This is irreversible.",
     };
   }
 
   const { page, context } = await initBrowser();
 
   try {
-    await page.goto(`${BOOKING_BASE_URL}/account/trips`, {
+    // 1) Resolve the booking's confirmation (detail) page URL + property name.
+    let detailUrl: string | undefined;
+    let propertyName: string | undefined;
+
+    if (/^https?:\/\//i.test(reservationId)) {
+      detailUrl = reservationId;
+    } else {
+      const tripId = reservationId.split("-")[0];
+      const suffix = reservationId.includes("-")
+        ? parseInt(reservationId.split("-")[1], 10)
+        : NaN;
+      const bookingIndex = Number.isFinite(suffix) ? suffix - 1 : 0;
+
+      await page.goto(`${TRIPS_URL}?trip_id=${tripId}`, {
+        waitUntil: "domcontentloaded",
+        timeout: DEFAULT_TIMEOUT,
+      });
+      await randomDelay();
+      await dismissBanners(page);
+      await page
+        .waitForSelector('a[href*="confirmation"]', { timeout: 12000 })
+        .catch(() => {});
+
+      const picked = await page.evaluate((idx: number) => {
+        const clean = (s: string | null | undefined) =>
+          (s || "").replace(/\s+/g, " ").trim();
+        const anchors = Array.from(
+          document.querySelectorAll<HTMLAnchorElement>('a[href*="confirmation"]')
+        ).filter((a) => a.querySelector("h3"));
+        const a = anchors[idx] || anchors[0];
+        if (!a) return null;
+        return { href: a.href, name: clean(a.querySelector("h3")?.textContent) };
+      }, bookingIndex);
+
+      if (!picked) {
+        return {
+          success: false,
+          reservationId,
+          message:
+            `Could not locate reservation ${reservationId} on your trips page. ` +
+            "It may already be cancelled, or the id is stale — re-run booking_get_reservations.",
+        };
+      }
+      detailUrl = picked.href;
+      propertyName = picked.name || undefined;
+    }
+
+    // 2) Open the confirmation page and read the "Cancel your booking" link.
+    await page.goto(detailUrl, {
       waitUntil: "domcontentloaded",
       timeout: DEFAULT_TIMEOUT,
     });
     await randomDelay();
     await dismissBanners(page);
 
-    // Look for the specific booking cancel button
-    const cancelBtn = await page.$(
-      `[data-booking-id="${reservationId}"] button[class*="cancel"], ` +
-        `[data-reservation-id="${reservationId}"] button[class*="cancel"], ` +
-        'button[aria-label*="Cancel booking"], button:has-text("Cancel booking")'
-    );
+    const cancelInfo = await page.evaluate(() => {
+      const clean = (s: string | null | undefined) =>
+        (s || "").replace(/\s+/g, " ").trim();
+      const a = Array.from(
+        document.querySelectorAll<HTMLAnchorElement>("a[href]")
+      ).find((x) => /cancel your booking/i.test(clean(x.textContent)));
+      return {
+        href: a?.href || null,
+        name: clean(document.querySelector("h1, h2")?.textContent) || null,
+      };
+    });
+    propertyName = propertyName || cancelInfo.name || undefined;
 
-    if (!cancelBtn) {
+    if (!cancelInfo.href) {
       return {
         success: false,
-        message: `Could not find cancel button for reservation ${reservationId}. ` +
-          "Navigate to your bookings page manually to cancel.",
+        reservationId,
+        propertyName,
+        message:
+          `No "Cancel your booking" option is available for reservation ${reservationId}. ` +
+          "The booking may be non-refundable, already cancelled, or past its cancellation window — cancel it manually if needed.",
       };
     }
 
-    await cancelBtn.click();
-    await randomDelay(1000, 1500);
+    // 3) Cancellation flow Step 1: reason survey on cancel.html.
+    await page.goto(cancelInfo.href, {
+      waitUntil: "domcontentloaded",
+      timeout: DEFAULT_TIMEOUT,
+    });
+    await randomDelay();
+    await dismissBanners(page);
 
-    // Confirm cancellation dialog
-    const confirmBtn = await page.$(
-      'button[data-testid="confirm-cancel"], button:has-text("Confirm cancellation"), ' +
-        'button:has-text("Yes, cancel"), button:has-text("Confirm")'
-    );
+    const reasonSelect = await page
+      .waitForSelector('select[name="cancel_survey"]', { timeout: 15000 })
+      .catch(() => null);
 
-    if (confirmBtn) {
-      await confirmBtn.click();
-      await randomDelay(1000, 2000);
+    if (!reasonSelect) {
+      return {
+        success: false,
+        reservationId,
+        propertyName,
+        message:
+          "Reached the cancellation page but could not find the reason form — " +
+          "Booking.com may have changed the flow. Cancel manually to be safe. " +
+          "No cancellation was performed.",
+      };
     }
+
+    // Pick a neutral reason (the survey is required to proceed); fall back to
+    // the first real option if the expected value isn't present.
+    const reasonValue = await page.evaluate(() => {
+      const sel = document.querySelector<HTMLSelectElement>(
+        'select[name="cancel_survey"]'
+      );
+      if (!sel) return null;
+      const preferred = "v6_personal_reasons_trip_called_off";
+      const opts = Array.from(sel.options).filter((o) => o.value);
+      const match = opts.find((o) => o.value === preferred) || opts[0];
+      return match ? match.value : null;
+    });
+    if (reasonValue) {
+      await page
+        .selectOption('select[name="cancel_survey"]', reasonValue)
+        .catch(() => {});
+    }
+    await randomDelay(400, 900);
+
+    // Advance to Step 2 (the review + final confirm). This does NOT cancel yet.
+    const continueBtn = await page.$(
+      'button:has-text("Continue"), button:has-text("Next")'
+    );
+    if (!continueBtn) {
+      return {
+        success: false,
+        reservationId,
+        propertyName,
+        message:
+          'Could not find the "Continue" button on the cancellation reason page. ' +
+          "No cancellation was performed.",
+      };
+    }
+    await continueBtn.click().catch(() => {});
+    await page
+      .waitForLoadState("networkidle", { timeout: 20000 })
+      .catch(() => {});
+    await randomDelay(800, 1500);
+
+    // 4) Step 2: the final, irreversible confirm. Match the real confirm button
+    // while explicitly excluding the "keep this booking" / policy decoys.
+    const confirmed = await page.evaluate(() => {
+      const clean = (s: string | null | undefined) =>
+        (s || "").replace(/\s+/g, " ").trim();
+      const candidates = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          'button, input[type="submit"], a[role="button"]'
+        )
+      );
+      const keep = /keep this booking|view cancellation policy|don'?t cancel/i;
+      const wanted =
+        /(confirm (this )?cancellation|cancel (this )?booking|yes,? cancel|confirm cancel)/i;
+      const target = candidates.find((el) => {
+        const t = clean(el.textContent) || el.getAttribute("value") || "";
+        return wanted.test(t) && !keep.test(t);
+      });
+      if (!target) return { clicked: false };
+      const label = clean(target.textContent) || target.getAttribute("value");
+      target.click();
+      return { clicked: true, label };
+    });
+
+    if (!confirmed.clicked) {
+      return {
+        success: false,
+        reservationId,
+        propertyName,
+        message:
+          "Reached the final cancellation step but could not identify the confirm " +
+          "button, so nothing was cancelled. The booking is still active — cancel " +
+          "manually if intended.",
+      };
+    }
+
+    await page
+      .waitForLoadState("networkidle", { timeout: 20000 })
+      .catch(() => {});
+    await randomDelay(1000, 2000);
+
+    // 5) Verify the cancellation actually took effect.
+    const cancelledNow = await page.evaluate(() => {
+      const body = (document.body.innerText || "")
+        .replace(/\s+/g, " ")
+        .toLowerCase();
+      return /(your booking (is|has been) cancell?ed|cancellation (is )?confirmed|booking cancell?ed|this booking (is|was) cancell?ed)/.test(
+        body
+      );
+    });
 
     await saveCookies(context);
 
     return {
-      success: true,
-      message: `Reservation ${reservationId} cancellation initiated. Check your email for confirmation.`,
+      success: cancelledNow,
+      reservationId,
+      propertyName,
+      status: cancelledNow ? "Cancelled" : "Unknown",
+      message: cancelledNow
+        ? `Reservation ${reservationId}${
+            propertyName ? ` (${propertyName})` : ""
+          } was cancelled. Check your email for Booking.com's confirmation.`
+        : `Submitted the cancellation for ${reservationId} but couldn't confirm it from the page. ` +
+          "Verify in your Booking.com trips / email before assuming it's cancelled.",
     };
   } catch (error) {
     throw new Error(
