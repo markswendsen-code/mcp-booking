@@ -30,6 +30,7 @@ import {
   cancelReservation,
   getPropertyReviews,
   closeBrowser,
+  SUPPORTED_AMENITIES,
 } from "./browser.js";
 import { loadSessionInfo, clearAuthData, getConfigDir } from "./auth.js";
 
@@ -62,7 +63,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "booking_login",
         description:
-          "Initiate Booking.com login flow. Returns a URL and instructions for the user to complete login manually. After logging in, use booking_status to verify.",
+          "Log in to Booking.com interactively. Opens a VISIBLE browser window pointed at the sign-in page; " +
+          "the user signs in there (including any 2FA/CAPTCHA) and the resulting session is captured and saved for reuse by other tools. " +
+          "Blocks until sign-in completes, the window is closed, or it times out (~4 minutes). " +
+          "Requires Google Chrome and a desktop display (cannot run on a headless server).",
         inputSchema: {
           type: "object",
           properties: {},
@@ -80,7 +84,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "booking_search",
         description:
-          "Search for hotels and properties on Booking.com. Returns property names, ratings, prices, and availability indicators.",
+          "Search for hotels and properties on Booking.com. Returns property names, ratings, prices, and availability indicators. " +
+          "Optionally filter server-side by amenities/facilities (e.g. pets, parking, pool) so only matching properties are returned.",
         inputSchema: {
           type: "object",
           properties: {
@@ -113,6 +118,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Maximum results to return (default: 10, max: 50)",
             },
+            amenities: {
+              type: "array",
+              items: {
+                type: "string",
+                enum: SUPPORTED_AMENITIES,
+              },
+              description:
+                "Filter results server-side to properties offering ALL of these amenities/facilities. " +
+                `Supported: ${SUPPORTED_AMENITIES.join(", ")}. ` +
+                "Example: [\"pets\", \"parking\", \"pool\"] for pet-friendly hotels with parking and a pool.",
+            },
+            rawNflt: {
+              type: "string",
+              description:
+                "Advanced/escape hatch: raw Booking.com `nflt` filter chips, ';'-delimited " +
+                "(e.g. 'hotelfacility=4;popular_activities=2'). Merged with `amenities`. " +
+                "Use when an amenity code needs correcting or for filters not in the amenities list.",
+            },
           },
           required: ["destination", "checkIn", "checkOut"],
         },
@@ -120,7 +143,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "booking_get_property",
         description:
-          "Get detailed information about a specific property, including amenities, description, policies, and photos.",
+          "Get detailed information about a specific property, including amenities, description, photos, raw policies, " +
+          "and a structured `facilitySummary` (parking, pool, fitness, spa, airConditioning, freeWifi, etc.). " +
+          "Facility fields are `true` when the amenity is found on the page or `null` when not mentioned. " +
+          "`petsAllowed` is the only tri-state field: `true` (allowed), `false` (explicitly not allowed), or `null` (not mentioned); " +
+          "`petsPolicy` carries the raw pet-policy text when present.",
         inputSchema: {
           type: "object",
           properties: {
@@ -198,7 +225,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "booking_filter_results",
         description:
-          "Filter the most recent booking_search results by price, rating, amenities, or keywords. Returns a filtered subset.",
+          "Client-side filter over the most recent booking_search results by price, review score, star rating, " +
+          "free cancellation, breakfast, or a name/location keyword. Returns a filtered subset. " +
+          "To filter by facilities like pets, parking, or pool, use the `amenities` argument on booking_search instead (filtered server-side).",
         inputSchema: {
           type: "object",
           properties: {
@@ -394,14 +423,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: "text",
-              text: JSON.stringify(
-                {
-                  success: true,
-                  ...result,
-                },
-                null,
-                2
-              ),
+              text: JSON.stringify(result, null, 2),
             },
           ],
         };
@@ -433,6 +455,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           rooms = 1,
           children = 0,
           maxResults = 10,
+          amenities,
+          rawNflt,
         } = args as {
           destination: string;
           checkIn: string;
@@ -441,6 +465,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           rooms?: number;
           children?: number;
           maxResults?: number;
+          amenities?: string[];
+          rawNflt?: string;
         };
 
         const properties = await searchProperties(
@@ -450,7 +476,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           adults,
           rooms,
           children,
-          Math.min(maxResults, 50)
+          Math.min(maxResults, 50),
+          amenities,
+          rawNflt
         );
 
         return {
@@ -465,6 +493,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   checkOut,
                   adults,
                   rooms,
+                  amenities: amenities && amenities.length ? amenities : undefined,
                   count: properties.length,
                   properties,
                 },

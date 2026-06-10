@@ -17,8 +17,8 @@ This MCP (Model Context Protocol) server gives AI agents the ability to interact
 | `booking_status` | Check login/session status |
 | `booking_login` | Initiate login flow (returns URL for manual login) |
 | `booking_logout` | Clear saved session and cookies |
-| `booking_search` | Search hotels by destination, dates, guests, rooms |
-| `booking_get_property` | Get property details (amenities, description, policies) |
+| `booking_search` | Search hotels by destination, dates, guests, rooms, and amenities (pets, parking, pool, …) |
+| `booking_get_property` | Get property details (amenities, description, policies, structured `facilitySummary`) |
 | `booking_check_availability` | Check room availability for specific dates |
 | `booking_get_prices` | Get pricing for a property |
 | `booking_filter_results` | Filter last search by price, rating, amenities |
@@ -63,11 +63,19 @@ Add to your MCP config (e.g. `~/.claude/mcp_servers.json`):
 
 ## Authentication
 
-The server uses cookie-based session persistence. Cookies are stored at `~/.strider/booking/`.
+The server uses cookie-based session persistence.
 
-1. Run `booking_login` to get the login URL
-2. Open the URL in your browser and sign in
-3. Run `booking_status` to verify the session is active
+1. Run `booking_login`. It opens a **visible browser window** at the Booking.com sign-in page.
+2. Sign in in that window (including any 2FA/CAPTCHA). The call blocks until you finish, close the window, or it times out (~4 min).
+3. On success the session is captured automatically; run `booking_status` to confirm.
+
+Because login drives a real browser window, it requires **Google Chrome installed and a desktop display** — it cannot run on a headless server.
+
+### Cookie storage
+
+- Session cookies are stored at `~/.strider/booking/cookies.json`, scoped to **Booking.com domains only** (unrelated third-party/tracking cookies are not persisted).
+- The config directory (`0700`) and the cookie/session files (`0600`) are created with owner-only permissions. The files are **not encrypted** — protect your home directory accordingly.
+- `booking_logout` deletes the saved cookies and session.
 
 ## Usage Examples
 
@@ -76,6 +84,21 @@ The server uses cookie-based session persistence. Cookies are stored at `~/.stri
 ```
 booking_search(destination="Paris", checkIn="2026-06-01", checkOut="2026-06-05", adults=2, rooms=1)
 ```
+
+### Search by amenities (pets, parking, pool, …)
+
+Amenity filters are applied **server-side** via Booking.com's `nflt` parameter, so results only contain matching properties.
+
+```
+# Pet-friendly hotels with parking and a pool
+booking_search(destination="Rome", checkIn="2026-06-01", checkOut="2026-06-05", amenities=["pets", "parking", "pool"])
+```
+
+Supported amenity keys: `pets`, `parking`, `pool`, `restaurant`, `room_service`, `front_desk_24h`, `fitness`, `non_smoking`, `airport_shuttle`, `family_rooms`, `ev_charging`, `spa`, `hot_tub`, `sauna`, `free_wifi`, `air_conditioning`.
+
+For a single property, `booking_get_property` returns a structured `facilitySummary` (e.g. `petsAllowed`, `parking`, `pool`, `spa`) where `true` = offered/allowed, `false` = not allowed, `null` = not mentioned on the page.
+
+> Note: amenity → filter codes are reverse-engineered from Booking.com's UI (undocumented but stable). If a filter behaves unexpectedly, supply an exact chip via `rawNflt` (e.g. `rawNflt="hotelfacility=4;popular_activities=2"`).
 
 ### Filter and sort results
 

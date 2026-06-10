@@ -7,7 +7,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import type { BrowserContext, Cookie } from "playwright";
+import type { BrowserContext, Cookie } from "patchright";
 
 const CONFIG_DIR = path.join(os.homedir(), ".strider", "booking");
 const COOKIES_FILE = path.join(CONFIG_DIR, "cookies.json");
@@ -22,21 +22,46 @@ export interface SessionInfo {
 }
 
 /**
- * Ensure config directory exists
+ * Best-effort chmod that ignores failures on filesystems/platforms where POSIX
+ * permission bits don't apply (e.g. Windows).
  */
-function ensureConfigDir(): void {
-  if (!fs.existsSync(CONFIG_DIR)) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+function tryChmod(target: string, mode: number): void {
+  try {
+    fs.chmodSync(target, mode);
+  } catch {
+    // ignore
   }
 }
 
 /**
- * Save cookies from browser context to disk
+ * Ensure config directory exists with owner-only (0700) permissions.
+ */
+function ensureConfigDir(): void {
+  if (!fs.existsSync(CONFIG_DIR)) {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  }
+  // Enforce on pre-existing directories created by older versions too.
+  tryChmod(CONFIG_DIR, 0o700);
+}
+
+/**
+ * Save cookies from browser context to disk.
+ *
+ * Only Booking.com cookies are persisted (third-party/tracking cookies from
+ * other domains are dropped), and the file is written with owner-only (0600)
+ * permissions since it holds the authenticated session.
  */
 export async function saveCookies(context: BrowserContext): Promise<void> {
   ensureConfigDir();
   const cookies = await context.cookies();
-  fs.writeFileSync(COOKIES_FILE, JSON.stringify(cookies, null, 2));
+  const bookingCookies = cookies.filter(
+    (c) => typeof c.domain === "string" && c.domain.includes("booking.com")
+  );
+  fs.writeFileSync(COOKIES_FILE, JSON.stringify(bookingCookies, null, 2), {
+    mode: 0o600,
+  });
+  // writeFileSync's mode only applies on creation; enforce on existing files.
+  tryChmod(COOKIES_FILE, 0o600);
 }
 
 /**
@@ -71,7 +96,8 @@ export async function loadCookies(context: BrowserContext): Promise<boolean> {
  */
 export function saveSessionInfo(info: SessionInfo): void {
   ensureConfigDir();
-  fs.writeFileSync(SESSION_FILE, JSON.stringify(info, null, 2));
+  fs.writeFileSync(SESSION_FILE, JSON.stringify(info, null, 2), { mode: 0o600 });
+  tryChmod(SESSION_FILE, 0o600);
 }
 
 /**

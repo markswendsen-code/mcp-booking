@@ -4,7 +4,7 @@
  * Playwright-based browser automation for Booking.com operations.
  */
 
-import { chromium, Browser, BrowserContext, Page } from "playwright";
+import { chromium, Browser, BrowserContext, Page } from "patchright";
 import {
   saveCookies,
   loadCookies,
@@ -14,6 +14,70 @@ import {
 
 const BOOKING_BASE_URL = "https://www.booking.com";
 const DEFAULT_TIMEOUT = 30000;
+
+/**
+ * Friendly amenity name -> Booking.com `nflt` filter chip.
+ *
+ * These chips are appended to the search URL (`&nflt=chip1;chip2;...`, URL-encoded)
+ * to filter results server-side. The codes are REVERSE-ENGINEERED from Booking.com's
+ * filter sidebar — they are undocumented and not an official API. They have been
+ * stable for years but can drift. To verify/repair a code: open a verified session,
+ * apply the filter in the UI, and read the `nflt` value from the resulting URL.
+ *
+ * `pets`, `parking`, and `pool` are the most consistently observed across sources.
+ * WiFi/air-conditioning codes are the least certain (sources disagree); if a filter
+ * returns unexpected results, pass an exact chip via the `rawNflt` argument instead.
+ */
+export const AMENITY_FILTERS: Record<string, string> = {
+  pets: "hotelfacility=4",
+  parking: "hotelfacility=2",
+  pool: "popular_activities=2",
+  restaurant: "hotelfacility=3",
+  room_service: "hotelfacility=5",
+  front_desk_24h: "hotelfacility=8",
+  fitness: "hotelfacility=11",
+  non_smoking: "hotelfacility=16",
+  airport_shuttle: "hotelfacility=17",
+  family_rooms: "hotelfacility=28",
+  ev_charging: "hotelfacility=54",
+  spa: "hotelfacility=107",
+  hot_tub: "hotelfacility=109",
+  sauna: "hotelfacility=433",
+  // Less certain across sources — verify against a live filtered URL if results look off.
+  free_wifi: "hotelfacility=107",
+  air_conditioning: "roomfacility=11",
+};
+
+/** All amenity keys the search filter understands (used for tool schema + validation). */
+export const SUPPORTED_AMENITIES = Object.keys(AMENITY_FILTERS);
+
+/**
+ * Build the `nflt` query value from a list of friendly amenity names plus any
+ * raw chips. Unknown amenity names are ignored. Duplicate chips are de-duped.
+ * Returns the un-encoded `;`-delimited string (URLSearchParams handles encoding),
+ * or undefined when nothing resolves.
+ */
+export function buildAmenityNflt(
+  amenities?: string[],
+  rawNflt?: string
+): string | undefined {
+  const chips: string[] = [];
+
+  for (const a of amenities ?? []) {
+    const chip = AMENITY_FILTERS[a.trim().toLowerCase()];
+    if (chip) chips.push(chip);
+  }
+
+  if (rawNflt) {
+    for (const chip of rawNflt.split(";")) {
+      const trimmed = chip.trim();
+      if (trimmed) chips.push(trimmed);
+    }
+  }
+
+  const unique = Array.from(new Set(chips));
+  return unique.length > 0 ? unique.join(";") : undefined;
+}
 
 // Singleton browser instance
 let browser: Browser | null = null;
@@ -83,6 +147,36 @@ export interface Review {
 /**
  * Initialize browser with stealth settings
  */
+/** Stealth-friendly UA shared by every browser context we create. */
+const STEALTH_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/** Common Playwright/patchright context options (UA, locale, viewport). */
+const CONTEXT_OPTIONS = {
+  userAgent: STEALTH_USER_AGENT,
+  viewport: { width: 1366, height: 768 },
+  locale: "en-US",
+  timezoneId: "America/New_York",
+  extraHTTPHeaders: {
+    "Accept-Language": "en-US,en;q=0.9",
+  },
+} as const;
+
+/** Apply navigator/window stealth patches to a page before any navigation. */
+async function applyStealth(p: Page): Promise<void> {
+  await p.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+    Object.defineProperty(navigator, "plugins", {
+      get: () => [1, 2, 3, 4, 5],
+    });
+    Object.defineProperty(navigator, "languages", {
+      get: () => ["en-US", "en"],
+    });
+    // @ts-ignore
+    window.chrome = { runtime: {} };
+  });
+}
+
 async function initBrowser(): Promise<{
   browser: Browser;
   context: BrowserContext;
@@ -94,6 +188,7 @@ async function initBrowser(): Promise<{
 
   browser = await chromium.launch({
     headless: true,
+    channel: "chrome", // Use real Chrome for stealth
     args: [
       "--disable-blink-features=AutomationControlled",
       "--no-sandbox",
@@ -104,16 +199,7 @@ async function initBrowser(): Promise<{
     ],
   });
 
-  context = await browser.newContext({
-    userAgent:
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    viewport: { width: 1366, height: 768 },
-    locale: "en-US",
-    timezoneId: "America/New_York",
-    extraHTTPHeaders: {
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
+  context = await browser.newContext(CONTEXT_OPTIONS);
 
   // Load saved cookies if available
   const cookiesLoaded = await loadCookies(context);
@@ -122,19 +208,7 @@ async function initBrowser(): Promise<{
   }
 
   page = await context.newPage();
-
-  // Stealth patches
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => false });
-    Object.defineProperty(navigator, "plugins", {
-      get: () => [1, 2, 3, 4, 5],
-    });
-    Object.defineProperty(navigator, "languages", {
-      get: () => ["en-US", "en"],
-    });
-    // @ts-ignore
-    window.chrome = { runtime: {} };
-  });
+  await applyStealth(page);
 
   return { browser, context, page };
 }
@@ -155,6 +229,24 @@ export async function closeBrowser(): Promise<void> {
 }
 
 /**
+ * Drop the singleton browser WITHOUT persisting its cookies. Used after an
+ * interactive login so the freshly captured session on disk is not clobbered by
+ * the (logged-out) cookie jar of the headless singleton on shutdown.
+ */
+async function resetBrowser(): Promise<void> {
+  if (browser) {
+    try {
+      await browser.close();
+    } catch {
+      // ignore
+    }
+  }
+  browser = null;
+  context = null;
+  page = null;
+}
+
+/**
  * Dismiss cookie/GDPR banners if present
  */
 async function dismissBanners(p: Page): Promise<void> {
@@ -171,6 +263,23 @@ async function dismissBanners(p: Page): Promise<void> {
   } catch {
     // Ignore
   }
+}
+
+/**
+ * Detect whether a page is showing a signed-in Booking.com session.
+ * Heuristic: the account menu is present and no sign-in link remains.
+ */
+async function detectLoggedIn(p: Page): Promise<boolean> {
+  const accountEl = await p.$(
+    '[data-testid="account-menu"], ' +
+      'button[data-testid="account-picker-trigger"], ' +
+      '[data-component="header-user-account"]'
+  );
+  const signInBtn = await p.$(
+    'a[href*="/sign-in"], a:has-text("Sign in"), a:has-text("Sign In"), ' +
+      '[data-testid="header-sign-in-button"]'
+  );
+  return signInBtn === null && accountEl !== null;
 }
 
 /**
@@ -246,37 +355,112 @@ export async function checkLoginStatus(): Promise<SessionInfo> {
 }
 
 /**
- * Initiate login flow
+ * Interactive login flow.
+ *
+ * Opens a VISIBLE browser window (a separate instance from the headless
+ * singleton used for scraping) pointed at the Booking.com sign-in page. The
+ * user signs in directly in that window — including any 2FA/CAPTCHA — and the
+ * resulting session cookies are captured into the shared cookie store, so every
+ * other booking_* tool reuses the authenticated session.
+ *
+ * Blocks until the user completes sign-in, closes the window, or `timeoutMs`
+ * elapses.
  */
-export async function initiateLogin(): Promise<{
-  loginUrl: string;
-  instructions: string;
+export async function initiateLogin(
+  timeoutMs: number = 240000
+): Promise<{
+  success: boolean;
+  isLoggedIn: boolean;
+  userEmail?: string;
+  message: string;
 }> {
-  const { page, context } = await initBrowser();
+  let loginBrowser: Browser;
+  try {
+    loginBrowser = await chromium.launch({
+      headless: false,
+      channel: "chrome", // Use real Chrome so the sign-in flow behaves normally
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+      ],
+    });
+  } catch (error) {
+    throw new Error(
+      "Could not open an interactive login window. Booking.com login requires a " +
+        "visible browser, which needs Google Chrome installed and a desktop display " +
+        "(it cannot run on a headless server). " +
+        `Underlying error: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 
   try {
-    await page.goto(`${BOOKING_BASE_URL}/sign-in`, {
+    const loginContext = await loginBrowser.newContext(CONTEXT_OPTIONS);
+    // Carry over any existing (possibly partial/expired) session.
+    await loadCookies(loginContext);
+    const loginPage = await loginContext.newPage();
+    await applyStealth(loginPage);
+
+    await loginPage.goto(`${BOOKING_BASE_URL}/sign-in`, {
       waitUntil: "domcontentloaded",
       timeout: DEFAULT_TIMEOUT,
     });
-    await randomDelay();
-    await saveCookies(context);
+    await dismissBanners(loginPage);
+
+    // Poll until the account menu appears (signed in), the window is closed, or
+    // we time out. Capture cookies the moment login is detected, while the
+    // context is still alive.
+    const deadline = Date.now() + timeoutMs;
+    let isLoggedIn = false;
+    while (Date.now() < deadline) {
+      if (loginPage.isClosed()) break;
+      try {
+        if (await detectLoggedIn(loginPage)) {
+          isLoggedIn = true;
+          await saveCookies(loginContext);
+          break;
+        }
+      } catch {
+        // Page mid-navigation or closing — retry on next tick.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+
+    let userEmail: string | undefined;
+    if (isLoggedIn && !loginPage.isClosed()) {
+      try {
+        const emailEl = await loginPage.$(
+          '[data-testid="user-email"], .user-email, [class*="email"]'
+        );
+        userEmail = (await emailEl?.textContent())?.trim() || undefined;
+      } catch {
+        // best-effort only
+      }
+    }
+
+    saveSessionInfo({
+      isLoggedIn,
+      userEmail,
+      lastUpdated: new Date().toISOString(),
+    });
 
     return {
-      loginUrl: `${BOOKING_BASE_URL}/sign-in`,
-      instructions:
-        "Please log in to Booking.com manually:\n" +
-        "1. Open the URL in your browser\n" +
-        "2. Sign in with your Booking.com account\n" +
-        "3. Once logged in, run 'booking_status' to verify the session\n\n" +
-        "Note: Session cookies are persisted to ~/.strider/booking/ for reuse.",
+      success: isLoggedIn,
+      isLoggedIn,
+      userEmail,
+      message: isLoggedIn
+        ? `Login successful${
+            userEmail ? ` (${userEmail})` : ""
+          }. Session captured and saved — other booking_* tools will reuse it.`
+        : "Login was not completed before the window was closed or timed out. " +
+          "Run booking_login again to retry.",
     };
-  } catch (error) {
-    throw new Error(
-      `Failed to initiate login: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    );
+  } finally {
+    await loginBrowser.close().catch(() => {});
+    // Reset the headless singleton so the next operation reloads the new cookies
+    // (without overwriting them via closeBrowser's save-on-close behaviour).
+    await resetBrowser();
   }
 }
 
@@ -290,7 +474,9 @@ export async function searchProperties(
   adults: number = 2,
   rooms: number = 1,
   children: number = 0,
-  maxResults: number = 10
+  maxResults: number = 10,
+  amenities?: string[],
+  rawNflt?: string
 ): Promise<PropertyResult[]> {
   const { page, context } = await initBrowser();
 
@@ -305,6 +491,12 @@ export async function searchProperties(
       group_children: String(children),
       lang: "en-us",
     });
+
+    // Server-side amenity/facility filtering via Booking.com's `nflt` parameter.
+    const nflt = buildAmenityNflt(amenities, rawNflt);
+    if (nflt) {
+      params.set("nflt", nflt);
+    }
 
     const searchUrl = `${BOOKING_BASE_URL}/searchresults.html?${params.toString()}`;
     await page.goto(searchUrl, {
@@ -501,6 +693,61 @@ export async function getPropertyDetails(
         '[data-testid="check-out-time"], .check-out-time, [class*="checkout"]'
       );
 
+      // Booking.com renders pet rules in a dedicated policy row; grab it if present.
+      const petsPolicyEl = document.querySelector(
+        '[data-testid="property-section--content"] [class*="pet"], ' +
+          '.hp-policies__content [class*="pet"], [data-testid*="pets"]'
+      );
+      const petsPolicyText = petsPolicyEl?.textContent?.trim() || "";
+
+      // Build a structured facility/policy summary by scanning the scraped text.
+      // null = not mentioned on the page (unknown), not the same as false.
+      const haystack = [
+        ...amenities,
+        ...policies,
+        petsPolicyText,
+        descEl?.textContent || "",
+      ]
+        .join(" \n ")
+        .toLowerCase();
+
+      const has = (...needles: string[]): boolean =>
+        needles.some((n) => haystack.includes(n));
+      const mentioned = (...needles: string[]): boolean =>
+        needles.some((n) => haystack.includes(n));
+
+      const petsAllowed: boolean | null = mentioned("pet")
+        ? !(
+            haystack.includes("pets are not allowed") ||
+            haystack.includes("no pets") ||
+            haystack.includes("pets not allowed")
+          )
+        : null;
+
+      const facilitySummary = {
+        petsAllowed,
+        petsPolicy: petsPolicyText || undefined,
+        parking: mentioned("parking") ? true : null,
+        pool: has("swimming pool", "pool") ? true : null,
+        fitness: has("fitness", "gym") ? true : null,
+        spa: has("spa", "wellness") ? true : null,
+        airConditioning: has("air conditioning", "air-conditioning")
+          ? true
+          : null,
+        freeWifi: has("free wifi", "free wi-fi")
+          ? true
+          : has("wifi", "wi-fi")
+          ? true
+          : null,
+        airportShuttle: has("airport shuttle", "shuttle") ? true : null,
+        hotTub: has("hot tub", "jacuzzi") ? true : null,
+        sauna: has("sauna") ? true : null,
+        evCharging: has("electric vehicle", "ev charging") ? true : null,
+        familyRooms: has("family room") ? true : null,
+        restaurant: has("restaurant") ? true : null,
+        nonSmoking: has("non-smoking", "non smoking") ? true : null,
+      };
+
       return {
         name: nameEl?.textContent?.trim() || "Unknown",
         address: addressEl?.textContent?.trim() || "",
@@ -508,6 +755,7 @@ export async function getPropertyDetails(
         reviewScore: scoreEl?.textContent?.trim() || undefined,
         amenities,
         policies,
+        facilitySummary,
         images,
         checkIn: checkInEl?.textContent?.trim() || undefined,
         checkOut: checkOutEl?.textContent?.trim() || undefined,
