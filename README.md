@@ -15,7 +15,8 @@ This MCP (Model Context Protocol) server gives AI agents the ability to interact
 | Tool | Description |
 |------|-------------|
 | `booking_status` | Check login/session status |
-| `booking_login` | Initiate login flow (returns URL for manual login) |
+| `booking_login` | Open a browser window to sign in (non-blocking; returns immediately) |
+| `booking_login_status` | Check progress of an in-flight `booking_login` |
 | `booking_logout` | Clear saved session and cookies |
 | `booking_search` | Search hotels by destination, dates, guests, rooms, and amenities (pets, parking, pool, …) |
 | `booking_get_property` | Get property details (amenities, description, policies, structured `facilitySummary`) |
@@ -63,11 +64,20 @@ Add to your MCP config (e.g. `~/.claude/mcp_servers.json`):
 
 ## Authentication
 
-The server uses cookie-based session persistence.
+The server uses cookie-based session persistence. Login is **non-blocking** (two
+steps) so it won't hang your MCP client while you wait on an emailed verification
+code:
 
-1. Run `booking_login`. It opens a **visible browser window** at the Booking.com sign-in page.
-2. Sign in in that window (including any 2FA/CAPTCHA). The call blocks until you finish, close the window, or it times out (~4 min).
-3. On success the session is captured automatically; run `booking_status` to confirm.
+1. Run `booking_login`. It opens a **visible browser window** at the Booking.com sign-in page and returns immediately.
+2. Sign in in that window (including any email/SMS code or 2FA/CAPTCHA). A background poller watches for completion.
+3. Run `booking_login_status` to check progress — it reports `in_progress`, `success`, `failed`, or `idle`. Poll it until it's no longer `in_progress`.
+4. On `success` the session is captured and saved automatically; `booking_status` will then show you as logged in.
+
+The background poller waits up to ~10 min by default; pass `timeoutSeconds` to
+`booking_login` to extend it (up to 30 min) if a verification code is slow to
+arrive. If the window is closed or the deadline passes before sign-in completes,
+the status becomes `failed` and the window is cleaned up — just call
+`booking_login` again.
 
 Because login drives a real browser window, it requires **Google Chrome installed and a desktop display** — it cannot run on a headless server.
 

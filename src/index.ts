@@ -17,7 +17,8 @@ import {
 
 import {
   checkLoginStatus,
-  initiateLogin,
+  startLogin,
+  getLoginProgress,
   searchProperties,
   getPropertyDetails,
   checkAvailability,
@@ -63,10 +64,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "booking_login",
         description:
-          "Log in to Booking.com interactively. Opens a VISIBLE browser window pointed at the sign-in page; " +
-          "the user signs in there (including any 2FA/CAPTCHA) and the resulting session is captured and saved for reuse by other tools. " +
-          "Blocks until sign-in completes, the window is closed, or it times out (~4 minutes). " +
-          "Requires Google Chrome and a desktop display (cannot run on a headless server).",
+          "Start an interactive Booking.com login. Opens a VISIBLE browser window at the sign-in page and returns " +
+          "IMMEDIATELY (non-blocking) — sign-in runs in the background, so this won't hang the client while the user " +
+          "waits on an emailed/SMS code, 2FA or CAPTCHA. The user completes sign-in in that window, then you call " +
+          "booking_login_status to confirm the session was captured. Requires Google Chrome and a desktop display " +
+          "(cannot run on a headless server).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            timeoutSeconds: {
+              type: "number",
+              description:
+                "How long the background poller waits for sign-in to complete before giving up and closing the window, " +
+                "in seconds (default: 600 = 10 min, max: 1800 = 30 min). Increase if email/SMS verification codes are slow.",
+            },
+          },
+        },
+      },
+      {
+        name: "booking_login_status",
+        description:
+          "Check the progress of an interactive login started with booking_login. Returns status 'in_progress' " +
+          "(window still open, awaiting sign-in), 'success' (session captured and saved — other booking_* tools will " +
+          "reuse it), 'failed' (window closed or timed out before completing), or 'idle' (no login started). " +
+          "Poll this after calling booking_login until the status is no longer 'in_progress'.",
         inputSchema: {
           type: "object",
           properties: {},
@@ -417,13 +438,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "booking_login": {
-        const result = await initiateLogin();
+        const { timeoutSeconds } = args as { timeoutSeconds?: number };
+        const timeoutMs =
+          typeof timeoutSeconds === "number" && timeoutSeconds > 0
+            ? Math.min(Math.max(timeoutSeconds, 30), 1800) * 1000
+            : undefined;
+        const progress = await startLogin(timeoutMs);
 
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify(result, null, 2),
+              text: JSON.stringify(
+                {
+                  ...progress,
+                  nextStep:
+                    progress.status === "in_progress"
+                      ? "Ask the user to finish signing in, then call booking_login_status to confirm."
+                      : undefined,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      case "booking_login_status": {
+        const progress = getLoginProgress();
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(progress, null, 2),
             },
           ],
         };
