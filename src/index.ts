@@ -106,7 +106,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "booking_search",
         description:
           "Search for hotels and properties on Booking.com. Returns property names, ratings, prices, and availability indicators. " +
-          "Optionally filter server-side by amenities/facilities (e.g. pets, parking, pool) so only matching properties are returned.",
+          "Optionally filter server-side by amenities/facilities (e.g. pets, parking, pool) so only matching properties are returned.\\n\\n" +
+          "PRICE FIELDS: `pricePerNight` and `totalPrice` both carry the same numeric value extracted from the card. " +
+          "On multi-night searches this is typically the TOTAL stay price (not per-night). " +
+          "Check `priceIsTotal` (true = total, false = explicitly per-night) and `priceNote` (raw card text) for context. " +
+          "`currency` is auto-detected from the card text when visible (e.g. 'CHF', 'EUR', 'USD'). " +
+          "For accurate per-night pricing on multi-night stays, divide `totalPrice` by number of nights.",
         inputSchema: {
           type: "object",
           properties: {
@@ -156,6 +161,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 "Advanced/escape hatch: raw Booking.com `nflt` filter chips, ';'-delimited " +
                 "(e.g. 'hotelfacility=4;popular_activities=2'). Merged with `amenities`. " +
                 "Use when an amenity code needs correcting or for filters not in the amenities list.",
+            },
+            flex_window: {
+              type: "number",
+              description:
+                "Date flexibility window (days). 0 = exact dates only (default). " +
+                "Positive values search with flexible dates around the given checkIn/checkOut: " +
+                "1=±1 day, 2=±2 days, 3=±3 days, 7=±7 days. " +
+                "When >0, Booking.com returns properties available across the date window, " +
+                "which can reveal cheaper options just outside your exact dates.",
             },
           },
           required: ["destination", "checkIn", "checkOut"],
@@ -515,6 +529,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           maxResults = 10,
           amenities,
           rawNflt,
+          flex_window = 0,
         } = args as {
           destination: string;
           checkIn: string;
@@ -525,6 +540,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           maxResults?: number;
           amenities?: string[];
           rawNflt?: string;
+          flex_window?: number;
         };
 
         const properties = await searchProperties(
@@ -536,7 +552,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           children,
           Math.min(maxResults, 50),
           amenities,
-          rawNflt
+          rawNflt,
+          flex_window
         );
 
         return {
@@ -552,6 +569,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   adults,
                   rooms,
                   amenities: amenities && amenities.length ? amenities : undefined,
+                  flex_window: flex_window || undefined,
                   count: properties.length,
                   properties,
                 },

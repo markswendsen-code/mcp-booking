@@ -100,9 +100,16 @@ export interface PropertyResult {
   rating?: number;
   reviewScore?: number;
   reviewCount?: number;
+  /** Price number extracted from the card. On multi-night searches this is typically the TOTAL stay price, not per-night. See priceNote for context. */
   pricePerNight?: string;
+  /** Same value as pricePerNight but named correctly: this is the total price shown on the card. */
   totalPrice?: string;
+  /** Currency code if detectable from the price text (e.g. 'CHF', 'EUR'). Null when the card doesn't show currency. */
   currency?: string;
+  /** Raw text from the card's price element, including qualifiers like 'per night' or 'for 3 nights'. */
+  priceNote?: string;
+  /** True when the card price is unambiguously the total stay price (multi-night). False when explicitly 'per night'. */
+  priceIsTotal?: boolean;
   imageUrl?: string;
   url?: string;
   distanceFromCenter?: string;
@@ -636,7 +643,8 @@ export async function searchProperties(
   children: number = 0,
   maxResults: number = 10,
   amenities?: string[],
-  rawNflt?: string
+  rawNflt?: string,
+  flexWindow: number = 0
 ): Promise<PropertyResult[]> {
   const { page, context } = await initBrowser();
 
@@ -644,13 +652,32 @@ export async function searchProperties(
     // Build search URL
     const params = new URLSearchParams({
       ss: destination,
-      checkin: checkIn,
-      checkout: checkOut,
       group_adults: String(adults),
       no_rooms: String(rooms),
       group_children: String(children),
       lang: "en-us",
     });
+
+    // Apply flexible-date window (Android-app-style ±N days).
+    if (flexWindow > 0) {
+      const parseDate = (d: string) => {
+        const [y, m, day] = d.split("-").map(Number);
+        return { year: y, month: m, day };
+      };
+      const ci = parseDate(checkIn);
+      const co = parseDate(checkOut);
+      params.set("efdco", "1");
+      params.set("checkin_month", String(ci.month));
+      params.set("checkin_monthday", String(ci.day));
+      params.set("checkin_year", String(ci.year));
+      params.set("checkout_month", String(co.month));
+      params.set("checkout_monthday", String(co.day));
+      params.set("checkout_year", String(co.year));
+      params.set("flex_window", String(flexWindow));
+    } else {
+      params.set("checkin", checkIn);
+      params.set("checkout", checkOut);
+    }
 
     // Server-side amenity/facility filtering via Booking.com's `nflt` parameter.
     const nflt = buildAmenityNflt(amenities, rawNflt);
@@ -717,6 +744,14 @@ export async function searchProperties(
         const priceMatch = priceText.match(/[\d,]+/);
         const price = priceMatch ? priceMatch[0].replace(/,/g, "") : undefined;
 
+        // Detect price context from the card and price element text
+        const isPerNight = /\bper\s+night\b/i.test(priceText) || /\b\/\s*night\b/i.test(priceText);
+        const isTotal = !isPerNight; // absence of "per night" → likely total stay price
+
+        // Try to detect currency symbol (CHF, €, $, £, etc.)
+        const currencyMatch = priceText.match(/CHF|EUR|USD|\$|€|£|BRL|R\$/i);
+        const currency = currencyMatch ? currencyMatch[0].toUpperCase() : undefined;
+
         const scoreText = scoreEl?.textContent?.trim() || "";
         const scoreMatch = scoreText.match(/\d+(?:\.\d+)?/);
         const reviewScore = scoreMatch ? parseFloat(scoreMatch[0]) : undefined;
@@ -738,7 +773,11 @@ export async function searchProperties(
           location: locationEl?.textContent?.trim() || "",
           reviewScore,
           reviewCount,
-          pricePerNight: price ? `${price}` : undefined,
+          pricePerNight: price || undefined,
+          totalPrice: price || undefined,
+          currency,
+          priceNote: priceText || undefined,
+          priceIsTotal: price ? isTotal : undefined,
           imageUrl: imgEl?.src || undefined,
           url: linkEl?.href || undefined,
           distanceFromCenter: distanceEl?.textContent?.trim() || undefined,
@@ -989,7 +1028,8 @@ export async function checkAvailability(
   checkIn: string,
   checkOut: string,
   adults: number = 2,
-  rooms: number = 1
+  rooms: number = 1,
+  flexWindow: number = 0
 ): Promise<{ available: boolean; rooms: RoomOption[]; message: string }> {
   const { page, context } = await initBrowser();
 
@@ -1008,7 +1048,25 @@ export async function checkAvailability(
 
     // Add date params to URL
     const separator = url.includes("?") ? "&" : "?";
-    const dateParams = `checkin=${checkIn}&checkout=${checkOut}&group_adults=${adults}&no_rooms=${rooms}`;
+    let dateParams: string;
+    if (flexWindow > 0) {
+      const [ciY, ciM, ciD] = checkIn.split("-").map(Number);
+      const [coY, coM, coD] = checkOut.split("-").map(Number);
+      dateParams = [
+        `efdco=1`,
+        `checkin_month=${ciM}`,
+        `checkin_monthday=${ciD}`,
+        `checkin_year=${ciY}`,
+        `checkout_month=${coM}`,
+        `checkout_monthday=${coD}`,
+        `checkout_year=${coY}`,
+        `flex_window=${flexWindow}`,
+        `group_adults=${adults}`,
+        `no_rooms=${rooms}`,
+      ].join("&");
+    } else {
+      dateParams = `checkin=${checkIn}&checkout=${checkOut}&group_adults=${adults}&no_rooms=${rooms}`;
+    }
     await page.goto(`${url}${separator}${dateParams}`, {
       waitUntil: "domcontentloaded",
       timeout: DEFAULT_TIMEOUT,

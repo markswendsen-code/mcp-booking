@@ -95,6 +95,31 @@ Because login drives a real browser window, it requires **Google Chrome installe
 booking_search(destination="Paris", checkIn="2026-06-01", checkOut="2026-06-05", adults=2, rooms=1)
 ```
 
+### Search with flexible dates (±N days)
+
+Use `flex_window` to widen the search around your exact dates, like the Android app "I'm flexible" feature:
+
+```
+# ±2 days flexibility around July 10-13
+booking_search(destination="Paris", checkIn="2026-07-10", checkOut="2026-07-13", flex_window=2)
+
+# ±7 days (full week flexibility)
+booking_search(destination="Paris", checkIn="2026-07-10", checkOut="2026-07-13", flex_window=7)
+```
+
+`flex_window` values: `0` (exact, default), `1` (±1 day), `2` (±2 days), `3` (±3 days), `7` (±7 days).
+
+### Understanding price fields
+
+The price returned by `booking_search` is **usually the total stay price** (not per-night) on multi-night searches:
+
+- **`pricePerNight`** / **`totalPrice`**: same numeric value — the price shown on the Booking.com card
+- **`priceIsTotal`**: `true` when the card shows total stay price; `false` only when explicitly labelled "per night"
+- **`priceNote`**: raw text from the card (e.g. "CHF 450 for 3 nights") — use this to verify context
+- **`currency`**: auto-detected from the card (CHF, EUR, USD, etc.)
+
+For multi-night stays, divide `totalPrice` by number of nights to get the actual nightly rate.
+
 ### Search by amenities (pets, parking, pool, …)
 
 Amenity filters are applied **server-side** via Booking.com's `nflt` parameter, so results only contain matching properties.
