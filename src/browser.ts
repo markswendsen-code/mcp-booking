@@ -5,6 +5,7 @@
  */
 
 import { chromium, Browser, BrowserContext, Page } from "patchright";
+import { applyChildren, validateChildren } from "./occupancy.js";
 import {
   saveCookies,
   loadCookies,
@@ -640,12 +641,14 @@ export async function searchProperties(
   checkOut: string,
   adults: number = 2,
   rooms: number = 1,
-  children: number = 0,
+  children?: number,
   maxResults: number = 10,
   amenities?: string[],
   rawNflt?: string,
-  flexWindow: number = 0
+  flexWindow: number = 0,
+  childAges?: number[]
 ): Promise<PropertyResult[]> {
+  validateChildren(children, childAges);
   const { page, context } = await initBrowser();
 
   try {
@@ -654,9 +657,10 @@ export async function searchProperties(
       ss: destination,
       group_adults: String(adults),
       no_rooms: String(rooms),
-      group_children: String(children),
+      group_children: "0",
       lang: "en-us",
     });
+    applyChildren(params, children, childAges);
 
     // Apply flexible-date window (Android-app-style ±N days).
     if (flexWindow > 0) {
@@ -1029,8 +1033,11 @@ export async function checkAvailability(
   checkOut: string,
   adults: number = 2,
   rooms: number = 1,
-  flexWindow: number = 0
+  flexWindow: number = 0,
+  children?: number,
+  childAges?: number[]
 ): Promise<{ available: boolean; rooms: RoomOption[]; message: string }> {
+  validateChildren(children, childAges);
   const { page, context } = await initBrowser();
 
   try {
@@ -1047,7 +1054,6 @@ export async function checkAvailability(
     }
 
     // Add date params to URL
-    const separator = url.includes("?") ? "&" : "?";
     let dateParams: string;
     if (flexWindow > 0) {
       const [ciY, ciM, ciD] = checkIn.split("-").map(Number);
@@ -1067,7 +1073,12 @@ export async function checkAvailability(
     } else {
       dateParams = `checkin=${checkIn}&checkout=${checkOut}&group_adults=${adults}&no_rooms=${rooms}`;
     }
-    await page.goto(`${url}${separator}${dateParams}`, {
+    const availabilityUrl = new URL(url);
+    for (const [key, value] of new URLSearchParams(dateParams)) {
+      availabilityUrl.searchParams.set(key, value);
+    }
+    applyChildren(availabilityUrl.searchParams, children, childAges);
+    await page.goto(availabilityUrl.toString(), {
       waitUntil: "domcontentloaded",
       timeout: DEFAULT_TIMEOUT,
     });
@@ -1248,14 +1259,19 @@ export async function getPrices(
   checkIn: string,
   checkOut: string,
   adults: number = 2,
-  rooms: number = 1
+  rooms: number = 1,
+  children?: number,
+  childAges?: number[]
 ): Promise<{ prices: RoomOption[]; currency: string; lowestPrice?: string }> {
   const avail = await checkAvailability(
     propertyUrlOrId,
     checkIn,
     checkOut,
     adults,
-    rooms
+    rooms,
+    0,
+    children,
+    childAges
   );
 
   const { page, context } = await initBrowser();
@@ -1479,8 +1495,11 @@ export async function bookRoom(
   checkOut: string,
   adults: number = 2,
   rooms: number = 1,
-  advanceToCheckout: boolean = false
+  advanceToCheckout: boolean = false,
+  children?: number,
+  childAges?: number[]
 ): Promise<BookingHandoff> {
+  validateChildren(children, childAges);
   // Resolve to a full property URL (accepts a propertyId from cached search).
   let url = propertyUrlOrId;
   if (!url.startsWith("http")) {
@@ -1498,20 +1517,25 @@ export async function bookRoom(
 
   // Set date/occupancy params cleanly so search-derived URLs (which already
   // carry checkin/checkout/group_adults) aren't duplicated.
-  let bookingUrl: string;
-  try {
-    const u = new URL(url);
-    u.searchParams.set("checkin", checkIn);
-    u.searchParams.set("checkout", checkOut);
-    u.searchParams.set("group_adults", String(adults));
-    u.searchParams.set("no_rooms", String(rooms));
-    bookingUrl = u.toString();
-  } catch {
-    const separator = url.includes("?") ? "&" : "?";
-    bookingUrl = `${url}${separator}checkin=${checkIn}&checkout=${checkOut}&group_adults=${adults}&no_rooms=${rooms}`;
-  }
+  const u = new URL(url);
+  u.searchParams.set("checkin", checkIn);
+  u.searchParams.set("checkout", checkOut);
+  u.searchParams.set("group_adults", String(adults));
+  u.searchParams.set("no_rooms", String(rooms));
+  applyChildren(u.searchParams, children, childAges);
+  const bookingUrl = u.toString();
 
-  const summary = { propertyUrl: url, checkIn, checkOut, adults, rooms };
+  const urlChildren = u.searchParams.get("group_children");
+  const urlAges = u.searchParams.getAll("age");
+  const summary = {
+    propertyUrl: url,
+    checkIn,
+    checkOut,
+    adults,
+    rooms,
+    children: urlChildren === null ? 0 : Number(urlChildren),
+    childAges: urlAges.map(Number),
+  };
   const baseMessage =
     "No booking was placed. Booking.com checkout is a multi-step wizard " +
     "(room selection, guest contact details, then payment) that must be completed " +

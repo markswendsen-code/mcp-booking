@@ -35,6 +35,21 @@ import {
 } from "./browser.js";
 import { loadSessionInfo, clearAuthData, getConfigDir } from "./auth.js";
 
+const CHILD_PROPERTIES = {
+  children: {
+    type: "integer",
+    minimum: 0,
+    description: "Number of children. Inferred from childAges when omitted.",
+  },
+  childAges: {
+    type: "array",
+    items: { type: "integer", minimum: 0, maximum: 17 },
+    description:
+      "Age of each child (0–17), e.g. [9]. Required for accurate child pricing. " +
+      "Must match children if both are provided.",
+  },
+};
+
 // Initialize server
 const server = new Server(
   {
@@ -136,10 +151,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Number of rooms (default: 1)",
             },
-            children: {
-              type: "number",
-              description: "Number of children (default: 0)",
-            },
+            ...CHILD_PROPERTIES,
             maxResults: {
               type: "number",
               description: "Maximum results to return (default: 10, max: 50)",
@@ -222,6 +234,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Number of rooms (default: 1)",
             },
+            ...CHILD_PROPERTIES,
           },
           required: ["propertyUrl", "checkIn", "checkOut"],
         },
@@ -253,6 +266,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Number of rooms (default: 1)",
             },
+            ...CHILD_PROPERTIES,
           },
           required: ["propertyUrl", "checkIn", "checkOut"],
         },
@@ -360,6 +374,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "number",
               description: "Number of rooms (default: 1)",
             },
+            ...CHILD_PROPERTIES,
             advanceToCheckout: {
               type: "boolean",
               description:
@@ -525,7 +540,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           checkOut,
           adults = 2,
           rooms = 1,
-          children = 0,
+          children,
+          childAges,
           maxResults = 10,
           amenities,
           rawNflt,
@@ -537,6 +553,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           adults?: number;
           rooms?: number;
           children?: number;
+          childAges?: number[];
           maxResults?: number;
           amenities?: string[];
           rawNflt?: string;
@@ -553,7 +570,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           Math.min(maxResults, 50),
           amenities,
           rawNflt,
-          flex_window
+          flex_window,
+          childAges
         );
 
         return {
@@ -568,6 +586,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   checkOut,
                   adults,
                   rooms,
+                  children: children ?? childAges?.length ?? 0,
+                  childAges,
                   amenities: amenities && amenities.length ? amenities : undefined,
                   flex_window: flex_window || undefined,
                   count: properties.length,
@@ -609,12 +629,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           checkOut,
           adults = 2,
           rooms = 1,
+          children,
+          childAges,
         } = args as {
           propertyUrl: string;
           checkIn: string;
           checkOut: string;
           adults?: number;
           rooms?: number;
+          children?: number;
+          childAges?: number[];
         };
 
         const result = await checkAvailability(
@@ -622,7 +646,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           checkIn,
           checkOut,
           adults,
-          rooms
+          rooms,
+          0,
+          children,
+          childAges
         );
 
         return {
@@ -649,12 +676,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           checkOut,
           adults = 2,
           rooms = 1,
+          children,
+          childAges,
         } = args as {
           propertyUrl: string;
           checkIn: string;
           checkOut: string;
           adults?: number;
           rooms?: number;
+          children?: number;
+          childAges?: number[];
         };
 
         const result = await getPrices(
@@ -662,7 +693,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           checkIn,
           checkOut,
           adults,
-          rooms
+          rooms,
+          children,
+          childAges
         );
 
         return {
@@ -774,6 +807,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           adults = 2,
           rooms = 1,
           advanceToCheckout = false,
+          children,
+          childAges,
         } = args as {
           propertyUrl: string;
           checkIn: string;
@@ -781,6 +816,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           adults?: number;
           rooms?: number;
           advanceToCheckout?: boolean;
+          children?: number;
+          childAges?: number[];
         };
 
         const result = await bookRoom(
@@ -789,7 +826,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           checkOut,
           adults,
           rooms,
-          advanceToCheckout
+          advanceToCheckout,
+          children,
+          childAges
         );
 
         return {

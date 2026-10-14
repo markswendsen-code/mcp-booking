@@ -95,6 +95,22 @@ Because login drives a real browser window, it requires **Google Chrome installe
 booking_search(destination="Paris", checkIn="2026-06-01", checkOut="2026-06-05", adults=2, rooms=1)
 ```
 
+### Search with children
+
+Pass each child's age for accurate pricing (ages 0–17). The child count is
+inferred from `childAges`, or you can supply a matching `children` count:
+
+```
+booking_search(destination="Rimini, Italy", checkIn="2026-10-31", checkOut="2026-11-01", adults=2, childAges=[9], rooms=1, amenities=["parking"])
+```
+
+`children` and `childAges` are also supported by `booking_check_availability`,
+`booking_get_prices`, and `booking_book`. Omitting both on these tools preserves
+child occupancy in the property URL from search; use `childAges=[]` or
+`children=0` to explicitly remove children. Providing only `children` remains
+supported, but Booking.com may default missing ages to zero: use `childAges`
+for reliable pricing.
+
 ### Search with flexible dates (±N days)
 
 Use `flex_window` to widen the search around your exact dates, like the Android app "I'm flexible" feature:
