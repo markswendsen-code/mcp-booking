@@ -51,9 +51,15 @@ function ensureConfigDir(): void {
  * other domains are dropped), and the file is written with owner-only (0600)
  * permissions since it holds the authenticated session.
  */
-export async function saveCookies(context: BrowserContext): Promise<void> {
+export async function saveCookies(
+  context: BrowserContext,
+  shouldPersist: () => boolean = () => true
+): Promise<void> {
+  if (!shouldPersist()) return;
   ensureConfigDir();
   const cookies = await context.cookies();
+  // A login/reset may retire this context while cookies() was awaiting.
+  if (!shouldPersist()) return;
   const bookingCookies = cookies.filter(
     (c) => typeof c.domain === "string" && c.domain.includes("booking.com")
   );

@@ -95,6 +95,69 @@ Because login drives a real browser window, it requires **Google Chrome installe
 booking_search(destination="Paris", checkIn="2026-06-01", checkOut="2026-06-05", adults=2, rooms=1)
 ```
 
+### Search with children
+
+Pass each child's age for accurate pricing (ages 0–17). The child count is
+inferred from `childAges`, or you can supply a matching `children` count:
+
+```
+booking_search(destination="Rimini, Italy", checkIn="2026-10-31", checkOut="2026-11-01", adults=2, childAges=[9], rooms=1, amenities=["parking"])
+```
+
+`children` and `childAges` are also supported by `booking_check_availability`,
+`booking_get_prices`, and `booking_book`. Omitting both on these tools preserves
+child occupancy in the property URL from search; use `childAges=[]` or
+`children=0` to explicitly remove children. Providing only `children` remains
+supported, but Booking.com may default missing ages to zero: use `childAges`
+for reliable pricing.
+
+### Server-side sorting and pagination
+
+`booking_search` supports `sortBy`: `price_asc`, `rating`, `distance`, or
+`popularity`. Sorting is requested from Booking.com before fetching a page;
+`booking_sort_results` only sorts the results already in memory.
+
+```
+booking_search(destination="Emilia-Romagna, Italy", checkIn="2026-10-31", checkOut="2026-11-01", adults=2, childAges=[9], amenities=["parking"], sortBy="price_asc", maxResults=25, offset=0)
+```
+
+For the next batch, repeat the same criteria with the returned `searchId` and
+`nextOffset`. Omitting `searchId` always starts a new, independent search.
+The response includes `searchId`, `offset`, `nextOffset`, and the count of unique properties.
+`nextOffset` is a suggested continuation, not a guarantee that another page exists;
+an empty batch returns `nextOffset: null`. Results may overlap or change between
+requests as Booking.com updates its inventory or injects promoted listings.
+If the next offset would exceed the supported limit (1000), `nextOffset` is null
+and `paginationLimitReached` is true; this is a loading limit, not the end of inventory.
+Promoted/recommended cards can appear outside the requested price order; locally
+sort the combined batches before presenting a strict cheapest-first shortlist.
+
+`maxResults` (1–50, default 10) limits unique properties in the returned batch.
+Booking.com's current UI ignores URL offsets for text destination searches, so
+the initial call loads the sorted feed from its start, scrolls (or clicks Load more
+results) until enough properties are available, and skips `offset` unique entries.
+Each `searchId` owns a separate tab in a shared browser/authentication context.
+Different searches can run concurrently; requests within one session are queued.
+Continuing a session reuses its tab and only loads additional properties as needed.
+`offset` and `maxResults` can change; other criteria must remain identical or the
+request is rejected (omit `searchId` to start a different search). Repeated or
+backwards offsets reuse the already-loaded feed. Property/detail tools use
+temporary tabs and do not navigate search tabs.
+
+Up to 8 search tabs are retained. Idle sessions expire after 10 minutes, and the
+oldest idle session is evicted when a new search needs capacity. Busy/queued
+sessions are never evicted. If all 8 are busy, a new search must wait and retry.
+Unknown/expired IDs return an error rather than silently starting over. Browser
+shutdown/login reset closes all search sessions.
+Offsets are bounded to 0–1000 to limit browser work. Larger offsets are slower.
+Loading stops after two 8-second intervals without new properties; this may mean
+the end of results or a stalled network, so a short/empty batch is not proof of
+exhaustive coverage. Duplicate card/container matches are removed before slicing.
+Use `searchId` with `booking_filter_results` and `booking_sort_results` to target
+the latest batch of a particular session. Without an ID they retain the legacy
+behavior of using the most recently completed search, which is ambiguous when
+searches run concurrently. They do not combine all batches automatically.
+
 ### Search with flexible dates (±N days)
 
 Use `flex_window` to widen the search around your exact dates, like the Android app "I'm flexible" feature:
